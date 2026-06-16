@@ -34,7 +34,7 @@ JSON, no JWE/PRT garbage). Sniff once on Mac, refresh forever.
 Setup
 -----
   1. brew install mitmproxy
-  2. mitmweb --mode regular@8080 --set web_port=8081 --set web_password=canvasmcp
+  2. mitmweb --mode regular@8080 --set web_port=8081 --set web_password=<yourpassword>
   3. Trust mitmproxy CA in macOS System keychain:
        sudo security add-trusted-cert -d -r trustRoot \\
          -k /Library/Keychains/System.keychain \\
