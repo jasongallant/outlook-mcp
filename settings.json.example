@@ -1,0 +1,6 @@
+{
+  "tenant": "common",
+  "user_email": "you@yourschool.edu",
+  "timezone": "America/New_York",
+  "writes_enabled": false
+}
