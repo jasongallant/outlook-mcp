@@ -19,8 +19,9 @@ src/outlook_mcp/
   config.py         Settings from ~/.config/outlook-mcp/settings.json
   auth.py           OAuth token storage in macOS Keychain + MS refresh
   graph_client.py   Microsoft Graph httpx wrapper + retry-once-on-401
-  ews_client.py     exchangelib wrapper for EWS (mail, calendar, contacts)
+  ews_client.py     exchangelib wrapper for EWS (one shared Account, cached token)
   tools.py          MCP tools (read default; write gated by settings)
+  attachments.py    Safe local saves for downloads, path checks for sends
   server.py         FastMCP entrypoint, stdio transport
   bootstrap.py      Interactive CLI to seed Keychain after Mac Mail sniff
 ```
@@ -41,7 +42,8 @@ Edit the file:
   "tenant": "common",
   "user_email": "you@yourschool.edu",
   "timezone": "America/New_York",
-  "writes_enabled": false
+  "writes_enabled": false,
+  "attachment_dir": "~/.cache/outlook-mcp/attachments"
 }
 ```
 
@@ -51,6 +53,7 @@ Edit the file:
 | `user_email` | `""` | Primary SMTP address for EWS |
 | `timezone` | `"America/New_York"` | IANA timezone for calendar operations |
 | `writes_enabled` | `false` | Enable write tools (or use `OUTLOOK_MCP_WRITES=1` env var) |
+| `attachment_dir` | `"~/.cache/outlook-mcp/attachments"` | Where `get_attachment` saves files. Private to your user, purged after 7 days |
 
 ## Install
 
@@ -141,9 +144,10 @@ env var in the MCP client config:
 - `get_user_profile` — Graph `/me`
 - `list_mail_folders`
 - `list_messages` — folder, unread filter, limit
-- `get_message` — full body
-- `search_messages` — subject + body substring
-- `list_attachments` — metadata only
+- `get_message` — full body + attachment metadata
+- `search_messages` — Exchange search index: whole words and word prefixes, `from:` / `subject:` supported, not mid-word substrings. Just-delivered mail may take a moment to appear
+- `list_attachments` — metadata only, including `attachment_id`
+- `get_attachment` — saves one attachment to `attachment_dir` and returns its path. Attached emails are saved as `.eml`
 - `list_events` — date range
 - `get_event`
 - `list_contacts`
@@ -153,8 +157,8 @@ env var in the MCP client config:
 - `search_tasks` — subject + body substring within a list
 
 **Write (OFF by default):**
-- `send_email`
-- `reply_to_message` (`reply_all` flag)
+- `send_email` — `attachments` (local file paths)
+- `reply_to_message` — `reply_all` flag, `attachments` (local file paths)
 - `mark_message_read`
 - `delete_message` — moves to Deleted Items (recoverable)
 - `create_event`
@@ -168,6 +172,14 @@ env var in the MCP client config:
 
 Each write tool description starts with `DESTRUCTIVE:` so the MCP client
 surfaces a clear approval prompt before running.
+
+### Attachment safety
+
+A malicious email could tell an agent to attach a local file and send it out.
+The send tools refuse hidden paths (`.ssh`, `.aws`, `.config`) and `~/Library`,
+except OneDrive and iCloud Drive folders, but this does not cover every sensitive
+file. **Keep client approval on for `send_email` and `reply_to_message`.** That
+prompt is the real protection.
 
 ### Microsoft To Do
 

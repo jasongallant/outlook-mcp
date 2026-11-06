@@ -22,6 +22,7 @@ _DEFAULTS: dict = {
     "user_email": "",
     "timezone": "America/New_York",
     "writes_enabled": False,
+    "attachment_dir": "~/.cache/outlook-mcp/attachments",
 }
 
 
@@ -46,6 +47,10 @@ def get_user_email() -> str:
 
 def get_timezone() -> str:
     return str(get("timezone") or _DEFAULTS["timezone"])
+
+
+def get_attachment_dir() -> Path:
+    return Path(str(get("attachment_dir") or _DEFAULTS["attachment_dir"])).expanduser()
 
 
 def writes_enabled() -> bool:

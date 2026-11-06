@@ -150,11 +150,12 @@ def force_refresh() -> str:
     return _refresh(load_tokens()).access_token
 
 
-def mint_token_for(scope: str) -> str:
+def mint_token_for(scope: str) -> tuple[str, int]:
     """Mint a fresh access token for an arbitrary scope using the cached refresh token.
 
-    Does not update the cached Graph access_token in Keychain — returns a one-shot
-    token to be used by the caller. Useful for resource-specific scopes like
+    Does not update the cached Graph access_token in Keychain — returns
+    ``(access_token, expires_in_seconds)`` for the caller to hold. Useful for
+    resource-specific scopes like
     ``https://outlook.office.com/.default offline_access`` (EWS).
 
     The refresh_token IS rotated in Keychain if the response carries a new one,
@@ -181,7 +182,7 @@ def mint_token_for(scope: str) -> str:
     new_refresh = payload.get("refresh_token")
     if new_refresh and new_refresh != bundle.refresh_token:
         _set("refresh_token", new_refresh)
-    return payload["access_token"]
+    return payload["access_token"], int(payload.get("expires_in", 3600))
 
 
 def get_user_email() -> str:
