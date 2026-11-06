@@ -41,7 +41,10 @@ Edit the file:
   "tenant": "common",
   "user_email": "you@yourschool.edu",
   "timezone": "America/New_York",
-  "writes_enabled": false
+  "writes_enabled": false,
+  "mail_writes_enabled": false,
+  "calendar_writes_enabled": false,
+  "todo_writes_enabled": false
 }
 ```
 
@@ -50,7 +53,15 @@ Edit the file:
 | `tenant` | `"common"` | Azure AD tenant UUID or `"common"` |
 | `user_email` | `""` | Primary SMTP address for EWS |
 | `timezone` | `"America/New_York"` | IANA timezone for calendar operations |
-| `writes_enabled` | `false` | Enable write tools (or use `OUTLOOK_MCP_WRITES=1` env var) |
+| `writes_enabled` | `false` | **Master** — enable all write tools (or `OUTLOOK_MCP_WRITES=1`) |
+| `mail_writes_enabled` | `false` | Enable only email writes (or `OUTLOOK_MCP_MAIL_WRITES=1`) |
+| `calendar_writes_enabled` | `false` | Enable only calendar writes (or `OUTLOOK_MCP_CALENDAR_WRITES=1`) |
+| `todo_writes_enabled` | `false` | Enable only To Do writes (or `OUTLOOK_MCP_TODO_WRITES=1`) |
+
+Write tools come in three independently-gated groups — **mail** (email
+send/reply/delete), **calendar** (events), and **To Do** (tasks). A group is
+enabled when the master flag **or** its own flag is set, so you can, for
+example, allow To Do writes while keeping email sending off.
 
 ## Install
 
@@ -124,14 +135,16 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-To enable writes, set `writes_enabled: true` in settings.json, or pass the
-env var in the MCP client config:
+To enable writes, set the relevant flag in settings.json, or pass the env var
+in the MCP client config. Use the master `writes_enabled` /
+`OUTLOOK_MCP_WRITES` for everything, or a per-group flag to enable one group.
+For example, To Do writes only (email/calendar stay read-only):
 
 ```json
 "outlook": {
   "command": "/path/to/outlook-mcp/.venv/bin/python",
   "args": ["-m", "outlook_mcp.server"],
-  "env": { "OUTLOOK_MCP_WRITES": "1" }
+  "env": { "OUTLOOK_MCP_TODO_WRITES": "1" }
 }
 ```
 

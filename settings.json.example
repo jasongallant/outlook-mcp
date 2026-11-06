@@ -2,5 +2,8 @@
   "tenant": "common",
   "user_email": "you@yourschool.edu",
   "timezone": "America/New_York",
-  "writes_enabled": false
+  "writes_enabled": false,
+  "mail_writes_enabled": false,
+  "calendar_writes_enabled": false,
+  "todo_writes_enabled": false
 }

@@ -22,7 +22,12 @@ _DEFAULTS: dict = {
     "user_email": "",
     "timezone": "America/New_York",
     "writes_enabled": False,
+    "mail_writes_enabled": False,
+    "calendar_writes_enabled": False,
+    "todo_writes_enabled": False,
 }
+
+_TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _load() -> dict:
@@ -48,12 +53,32 @@ def get_timezone() -> str:
     return str(get("timezone") or _DEFAULTS["timezone"])
 
 
-def writes_enabled() -> bool:
-    """True if OUTLOOK_MCP_WRITES env var is truthy, or settings.json writes_enabled is true."""
-    env = os.environ.get("OUTLOOK_MCP_WRITES", "").strip().lower()
+def _flag(env_name: str, setting_key: str) -> bool:
+    """A boolean toggle: env var wins if set, else the settings.json key."""
+    env = os.environ.get(env_name, "").strip().lower()
     if env:
-        return env in {"1", "true", "yes", "on"}
-    return bool(get("writes_enabled"))
+        return env in _TRUTHY
+    return bool(get(setting_key))
+
+
+def writes_enabled() -> bool:
+    """Master write switch: enables all write groups (mail, calendar, To Do)."""
+    return _flag("OUTLOOK_MCP_WRITES", "writes_enabled")
+
+
+def mail_writes_enabled() -> bool:
+    """Email write tools (send/reply/mark-read/delete). On if master or mail flag."""
+    return writes_enabled() or _flag("OUTLOOK_MCP_MAIL_WRITES", "mail_writes_enabled")
+
+
+def calendar_writes_enabled() -> bool:
+    """Calendar write tools (create/update/respond). On if master or calendar flag."""
+    return writes_enabled() or _flag("OUTLOOK_MCP_CALENDAR_WRITES", "calendar_writes_enabled")
+
+
+def todo_writes_enabled() -> bool:
+    """To Do write tools (create/update/complete/delete task, create list). On if master or todo flag."""
+    return writes_enabled() or _flag("OUTLOOK_MCP_TODO_WRITES", "todo_writes_enabled")
 
 
 def save(updates: dict) -> None:

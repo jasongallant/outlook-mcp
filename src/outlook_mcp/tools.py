@@ -8,10 +8,17 @@
   ``/me/todo/*`` endpoints 403; To Do lists are plain IPF.Task mailbox folders
   reachable over EWS).
 
-Read tools registered always. Write tools (send_email, reply, mark_read,
-delete_message, create_event, update_event, respond_to_event, create_task,
-update_task, complete_task, delete_task, create_todo_list) are gated behind
-``OUTLOOK_MCP_WRITES`` env var so they never fire by accident.
+Read tools register always. Write tools register only when enabled, so they
+never fire by accident, and are split into three independently-gated groups
+(see ``config.py``):
+
+- mail — send_email, reply_to_message, mark_message_read, delete_message
+- calendar — create_event, update_event, respond_to_event
+- To Do — create_task, update_task, complete_task, delete_task, create_todo_list
+
+Each group is on when the master flag (``OUTLOOK_MCP_WRITES`` /
+``writes_enabled``) OR its own flag is truthy, e.g. ``OUTLOOK_MCP_TODO_WRITES``
+/ ``todo_writes_enabled`` for To Do.
 """
 
 from __future__ import annotations
@@ -46,7 +53,12 @@ for _fname in ("due_date", "start_date"):
 from mcp.server.fastmcp import FastMCP
 
 from . import graph_client as g
-from .config import get_timezone, writes_enabled
+from .config import (
+    calendar_writes_enabled,
+    get_timezone,
+    mail_writes_enabled,
+    todo_writes_enabled,
+)
 from .ews_client import with_account
 
 
@@ -383,284 +395,286 @@ def register_tools(mcp: FastMCP) -> None:
 
         return with_account(_act)
 
-    # ---------------- WRITE (gated) ----------------
+    # ---------------- MAIL WRITE (gated) ----------------
 
-    if not writes_enabled():
-        return
+    if mail_writes_enabled():
+        @mcp.tool(
+            description=(
+                "DESTRUCTIVE: Send an email from the user's mailbox. to/cc/bcc are lists of "
+                "plain addresses. body_html=true treats body as HTML."
+            ),
+        )
+        def send_email(
+            to: list[str],
+            subject: str,
+            body: str,
+            cc: list[str] | None = None,
+            bcc: list[str] | None = None,
+            body_html: bool = False,
+        ) -> dict:
+            def _act(a: Account) -> dict:
+                m = Message(
+                    account=a,
+                    subject=subject,
+                    body=HTMLBody(body) if body_html else body,
+                    to_recipients=[Mailbox(email_address=x) for x in to],
+                    cc_recipients=[Mailbox(email_address=x) for x in (cc or [])],
+                    bcc_recipients=[Mailbox(email_address=x) for x in (bcc or [])],
+                )
+                m.send_and_save()
+                return {"sent": True, "to": to, "subject": subject}
 
-    @mcp.tool(
-        description=(
-            "DESTRUCTIVE: Send an email from the user's mailbox. to/cc/bcc are lists of "
-            "plain addresses. body_html=true treats body as HTML."
-        ),
-    )
-    def send_email(
-        to: list[str],
-        subject: str,
-        body: str,
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
-        body_html: bool = False,
-    ) -> dict:
-        def _act(a: Account) -> dict:
-            m = Message(
-                account=a,
-                subject=subject,
-                body=HTMLBody(body) if body_html else body,
-                to_recipients=[Mailbox(email_address=x) for x in to],
-                cc_recipients=[Mailbox(email_address=x) for x in (cc or [])],
-                bcc_recipients=[Mailbox(email_address=x) for x in (bcc or [])],
-            )
-            m.send_and_save()
-            return {"sent": True, "to": to, "subject": subject}
+            return with_account(_act)
 
-        return with_account(_act)
+        @mcp.tool(
+            description=(
+                "DESTRUCTIVE: Reply to a message. reply_all=True replies to everyone on thread. "
+                "comment is the reply body text."
+            ),
+        )
+        def reply_to_message(message_id: str, comment: str, reply_all: bool = False) -> dict:
+            def _act(a: Account) -> dict:
+                m = a.inbox.get(id=message_id)
+                reply = m.create_reply_all(subject=f"RE: {m.subject}", body=comment) if reply_all else m.create_reply(subject=f"RE: {m.subject}", body=comment)
+                reply.send()
+                return {"replied": True, "reply_all": reply_all, "message_id": message_id}
 
-    @mcp.tool(
-        description=(
-            "DESTRUCTIVE: Reply to a message. reply_all=True replies to everyone on thread. "
-            "comment is the reply body text."
-        ),
-    )
-    def reply_to_message(message_id: str, comment: str, reply_all: bool = False) -> dict:
-        def _act(a: Account) -> dict:
-            m = a.inbox.get(id=message_id)
-            reply = m.create_reply_all(subject=f"RE: {m.subject}", body=comment) if reply_all else m.create_reply(subject=f"RE: {m.subject}", body=comment)
-            reply.send()
-            return {"replied": True, "reply_all": reply_all, "message_id": message_id}
+            return with_account(_act)
 
-        return with_account(_act)
+        @mcp.tool(description="Mark a message read or unread. Reversible.")
+        def mark_message_read(message_id: str, is_read: bool = True) -> dict:
+            def _act(a: Account) -> dict:
+                m = a.inbox.get(id=message_id)
+                m.is_read = is_read
+                m.save()
+                return {"id": message_id, "is_read": is_read}
 
-    @mcp.tool(description="Mark a message read or unread. Reversible.")
-    def mark_message_read(message_id: str, is_read: bool = True) -> dict:
-        def _act(a: Account) -> dict:
-            m = a.inbox.get(id=message_id)
-            m.is_read = is_read
-            m.save()
-            return {"id": message_id, "is_read": is_read}
+            return with_account(_act)
 
-        return with_account(_act)
+        @mcp.tool(
+            description="DESTRUCTIVE: Move a message to Deleted Items (recoverable from trash).",
+        )
+        def delete_message(message_id: str) -> dict:
+            def _act(a: Account) -> dict:
+                m = a.inbox.get(id=message_id)
+                m.move_to_trash()
+                return {"deleted": True, "message_id": message_id}
 
-    @mcp.tool(
-        description="DESTRUCTIVE: Move a message to Deleted Items (recoverable from trash).",
-    )
-    def delete_message(message_id: str) -> dict:
-        def _act(a: Account) -> dict:
-            m = a.inbox.get(id=message_id)
-            m.move_to_trash()
-            return {"deleted": True, "message_id": message_id}
+            return with_account(_act)
 
-        return with_account(_act)
+    # ---------------- CALENDAR WRITE (gated) ----------------
 
-    @mcp.tool(
-        description=(
-            "Create a calendar event on the primary calendar. start/end are ISO 8601 "
-            "(local, in the timezone set in settings.json). attendees is a list of email addresses."
-        ),
-    )
-    def create_event(
-        subject: str,
-        start: str,
-        end: str,
-        location: str | None = None,
-        body: str | None = None,
-        attendees: list[str] | None = None,
-    ) -> dict:
-        def _act(a: Account) -> dict:
-            tz = EWSTimeZone(get_timezone())
-            ev = CalendarItem(
-                account=a,
-                folder=a.calendar,
-                subject=subject,
-                start=EWSDateTime.from_datetime(datetime.fromisoformat(start)).astimezone(tz),
-                end=EWSDateTime.from_datetime(datetime.fromisoformat(end)).astimezone(tz),
-                location=location or "",
-                body=body or "",
-                required_attendees=[Mailbox(email_address=x) for x in (attendees or [])],
-            )
-            ev.save(send_meeting_invitations="SendOnlyToAll" if attendees else "SendToNone")
-            return _event_to_dict(ev)
+    if calendar_writes_enabled():
+        @mcp.tool(
+            description=(
+                "Create a calendar event on the primary calendar. start/end are ISO 8601 "
+                "(local, in the timezone set in settings.json). attendees is a list of email addresses."
+            ),
+        )
+        def create_event(
+            subject: str,
+            start: str,
+            end: str,
+            location: str | None = None,
+            body: str | None = None,
+            attendees: list[str] | None = None,
+        ) -> dict:
+            def _act(a: Account) -> dict:
+                tz = EWSTimeZone(get_timezone())
+                ev = CalendarItem(
+                    account=a,
+                    folder=a.calendar,
+                    subject=subject,
+                    start=EWSDateTime.from_datetime(datetime.fromisoformat(start)).astimezone(tz),
+                    end=EWSDateTime.from_datetime(datetime.fromisoformat(end)).astimezone(tz),
+                    location=location or "",
+                    body=body or "",
+                    required_attendees=[Mailbox(email_address=x) for x in (attendees or [])],
+                )
+                ev.save(send_meeting_invitations="SendOnlyToAll" if attendees else "SendToNone")
+                return _event_to_dict(ev)
 
-        return with_account(_act)
+            return with_account(_act)
 
-    @mcp.tool(
-        description="DESTRUCTIVE: Patch fields on an existing event (subject, start, end, location, body).",
-    )
-    def update_event(
-        event_id: str,
-        subject: str | None = None,
-        start: str | None = None,
-        end: str | None = None,
-        location: str | None = None,
-        body: str | None = None,
-    ) -> dict:
-        def _act(a: Account) -> dict:
-            ev = a.calendar.get(id=event_id)
-            tz = EWSTimeZone(get_timezone())
-            if subject is not None:
-                ev.subject = subject
-            if start is not None:
-                ev.start = EWSDateTime.from_datetime(datetime.fromisoformat(start)).astimezone(tz)
-            if end is not None:
-                ev.end = EWSDateTime.from_datetime(datetime.fromisoformat(end)).astimezone(tz)
-            if location is not None:
-                ev.location = location
-            if body is not None:
-                ev.body = body
-            ev.save(send_meeting_invitations_or_cancellations="SendOnlyToAll")
-            return _event_to_dict(ev)
+        @mcp.tool(
+            description="DESTRUCTIVE: Patch fields on an existing event (subject, start, end, location, body).",
+        )
+        def update_event(
+            event_id: str,
+            subject: str | None = None,
+            start: str | None = None,
+            end: str | None = None,
+            location: str | None = None,
+            body: str | None = None,
+        ) -> dict:
+            def _act(a: Account) -> dict:
+                ev = a.calendar.get(id=event_id)
+                tz = EWSTimeZone(get_timezone())
+                if subject is not None:
+                    ev.subject = subject
+                if start is not None:
+                    ev.start = EWSDateTime.from_datetime(datetime.fromisoformat(start)).astimezone(tz)
+                if end is not None:
+                    ev.end = EWSDateTime.from_datetime(datetime.fromisoformat(end)).astimezone(tz)
+                if location is not None:
+                    ev.location = location
+                if body is not None:
+                    ev.body = body
+                ev.save(send_meeting_invitations_or_cancellations="SendOnlyToAll")
+                return _event_to_dict(ev)
 
-        return with_account(_act)
+            return with_account(_act)
 
-    @mcp.tool(
-        description=(
-            "DESTRUCTIVE: Respond to a meeting invite. response is one of "
-            "accept, decline, tentativelyAccept."
-        ),
-    )
-    def respond_to_event(event_id: str, response: str, comment: str = "") -> dict:
-        if response not in {"accept", "decline", "tentativelyAccept"}:
-            raise ValueError("response must be accept|decline|tentativelyAccept")
+        @mcp.tool(
+            description=(
+                "DESTRUCTIVE: Respond to a meeting invite. response is one of "
+                "accept, decline, tentativelyAccept."
+            ),
+        )
+        def respond_to_event(event_id: str, response: str, comment: str = "") -> dict:
+            if response not in {"accept", "decline", "tentativelyAccept"}:
+                raise ValueError("response must be accept|decline|tentativelyAccept")
 
-        def _act(a: Account) -> dict:
-            ev = a.calendar.get(id=event_id)
-            cls_map = {
-                "accept": AcceptItem,
-                "decline": DeclineItem,
-                "tentativelyAccept": TentativelyAcceptItem,
-            }
-            cls_map[response](
-                account=a,
-                reference_item_id=ev.id,
-                body=comment,
-            ).send()
-            return {"event_id": event_id, "response": response}
+            def _act(a: Account) -> dict:
+                ev = a.calendar.get(id=event_id)
+                cls_map = {
+                    "accept": AcceptItem,
+                    "decline": DeclineItem,
+                    "tentativelyAccept": TentativelyAcceptItem,
+                }
+                cls_map[response](
+                    account=a,
+                    reference_item_id=ev.id,
+                    body=comment,
+                ).send()
+                return {"event_id": event_id, "response": response}
 
-        return with_account(_act)
+            return with_account(_act)
 
-    # ---------------- TO DO (write, gated) ----------------
+    # ---------------- TO DO WRITE (gated) ----------------
 
-    @mcp.tool(
-        description=(
-            "Create a Microsoft To Do task. list is the target list name (omit for the "
-            "default Tasks list). due is a date 'YYYY-MM-DD'. reminder is an ISO datetime "
-            "(local, settings.json timezone). importance is low|normal|high."
-        ),
-    )
-    def create_task(
-        title: str,
-        list: str | None = None,
-        due: str | None = None,
-        reminder: str | None = None,
-        body: str | None = None,
-        importance: str = "normal",
-    ) -> dict:
-        imp = _IMPORTANCE.get(importance.lower())
-        if imp is None:
-            raise ValueError("importance must be low|normal|high")
-
-        def _act(a: Account) -> dict:
-            f = _resolve_list(a, list)
-            t = Task(account=a, folder=f, subject=title, importance=imp)
-            if body is not None:
-                t.body = body
-            if due is not None:
-                t.due_date = _parse_due(due)
-            if reminder is not None:
-                t.reminder_is_set = True
-                t.reminder_due_by = _parse_reminder(reminder)
-            t.save()
-            # Re-fetch: server derives status/percent/is_complete; the saved
-            # in-memory object does not reflect them.
-            return _task_to_dict(a.tasks.get(id=t.id), f.name)
-
-        return with_account(_act)
-
-    @mcp.tool(
-        description=(
-            "DESTRUCTIVE: Patch fields on a To Do task (title, due 'YYYY-MM-DD', reminder "
-            "ISO datetime, body, importance low|normal|high, status "
-            "notStarted|inProgress|completed|waitingOnOthers|deferred)."
-        ),
-    )
-    def update_task(
-        task_id: str,
-        title: str | None = None,
-        due: str | None = None,
-        reminder: str | None = None,
-        body: str | None = None,
-        importance: str | None = None,
-        status: str | None = None,
-    ) -> dict:
-        status_map = {
-            "notstarted": "NotStarted",
-            "inprogress": "InProgress",
-            "completed": "Completed",
-            "waitingonothers": "WaitingOnOthers",
-            "deferred": "Deferred",
-        }
-        imp = None
-        if importance is not None:
+    if todo_writes_enabled():
+        @mcp.tool(
+            description=(
+                "Create a Microsoft To Do task. list is the target list name (omit for the "
+                "default Tasks list). due is a date 'YYYY-MM-DD'. reminder is an ISO datetime "
+                "(local, settings.json timezone). importance is low|normal|high."
+            ),
+        )
+        def create_task(
+            title: str,
+            list: str | None = None,
+            due: str | None = None,
+            reminder: str | None = None,
+            body: str | None = None,
+            importance: str = "normal",
+        ) -> dict:
             imp = _IMPORTANCE.get(importance.lower())
             if imp is None:
                 raise ValueError("importance must be low|normal|high")
-        st = None
-        if status is not None:
-            st = status_map.get(status.lower())
-            if st is None:
-                raise ValueError(f"status must be one of {', '.join(status_map)}")
 
-        def _act(a: Account) -> dict:
-            t = a.tasks.get(id=task_id)
-            if title is not None:
-                t.subject = title
-            if body is not None:
-                t.body = body
-            if imp is not None:
-                t.importance = imp
-            if due is not None:
-                t.due_date = _parse_due(due)
-            if reminder is not None:
-                t.reminder_is_set = True
-                t.reminder_due_by = _parse_reminder(reminder)
-            if st is not None:
-                # Setting status drives percent_complete server-side; only
-                # reopening needs an explicit reset (percent is a Decimal field).
-                t.status = st
-                if st == "NotStarted":
-                    t.percent_complete = Decimal(0)
-            t.save()
-            return _task_to_dict(a.tasks.get(id=task_id))
+            def _act(a: Account) -> dict:
+                f = _resolve_list(a, list)
+                t = Task(account=a, folder=f, subject=title, importance=imp)
+                if body is not None:
+                    t.body = body
+                if due is not None:
+                    t.due_date = _parse_due(due)
+                if reminder is not None:
+                    t.reminder_is_set = True
+                    t.reminder_due_by = _parse_reminder(reminder)
+                t.save()
+                # Re-fetch: server derives status/percent/is_complete; the saved
+                # in-memory object does not reflect them.
+                return _task_to_dict(a.tasks.get(id=t.id), f.name)
 
-        return with_account(_act)
+            return with_account(_act)
 
-    @mcp.tool(description="Mark a To Do task complete. Reversible via update_task status=notStarted.")
-    def complete_task(task_id: str) -> dict:
-        def _act(a: Account) -> dict:
-            t = a.tasks.get(id=task_id)
-            t.status = "Completed"  # server auto-sets percent_complete=100
-            t.save()
-            return _task_to_dict(a.tasks.get(id=task_id))
+        @mcp.tool(
+            description=(
+                "DESTRUCTIVE: Patch fields on a To Do task (title, due 'YYYY-MM-DD', reminder "
+                "ISO datetime, body, importance low|normal|high, status "
+                "notStarted|inProgress|completed|waitingOnOthers|deferred)."
+            ),
+        )
+        def update_task(
+            task_id: str,
+            title: str | None = None,
+            due: str | None = None,
+            reminder: str | None = None,
+            body: str | None = None,
+            importance: str | None = None,
+            status: str | None = None,
+        ) -> dict:
+            status_map = {
+                "notstarted": "NotStarted",
+                "inprogress": "InProgress",
+                "completed": "Completed",
+                "waitingonothers": "WaitingOnOthers",
+                "deferred": "Deferred",
+            }
+            imp = None
+            if importance is not None:
+                imp = _IMPORTANCE.get(importance.lower())
+                if imp is None:
+                    raise ValueError("importance must be low|normal|high")
+            st = None
+            if status is not None:
+                st = status_map.get(status.lower())
+                if st is None:
+                    raise ValueError(f"status must be one of {', '.join(status_map)}")
 
-        return with_account(_act)
+            def _act(a: Account) -> dict:
+                t = a.tasks.get(id=task_id)
+                if title is not None:
+                    t.subject = title
+                if body is not None:
+                    t.body = body
+                if imp is not None:
+                    t.importance = imp
+                if due is not None:
+                    t.due_date = _parse_due(due)
+                if reminder is not None:
+                    t.reminder_is_set = True
+                    t.reminder_due_by = _parse_reminder(reminder)
+                if st is not None:
+                    # Setting status drives percent_complete server-side; only
+                    # reopening needs an explicit reset (percent is a Decimal field).
+                    t.status = st
+                    if st == "NotStarted":
+                        t.percent_complete = Decimal(0)
+                t.save()
+                return _task_to_dict(a.tasks.get(id=task_id))
 
-    @mcp.tool(
-        description="DESTRUCTIVE: Move a To Do task to Deleted Items (recoverable from trash).",
-    )
-    def delete_task(task_id: str) -> dict:
-        def _act(a: Account) -> dict:
-            t = a.tasks.get(id=task_id)
-            t.move_to_trash()
-            return {"deleted": True, "task_id": task_id}
+            return with_account(_act)
 
-        return with_account(_act)
+        @mcp.tool(description="Mark a To Do task complete. Reversible via update_task status=notStarted.")
+        def complete_task(task_id: str) -> dict:
+            def _act(a: Account) -> dict:
+                t = a.tasks.get(id=task_id)
+                t.status = "Completed"  # server auto-sets percent_complete=100
+                t.save()
+                return _task_to_dict(a.tasks.get(id=task_id))
 
-    @mcp.tool(description="Create a new Microsoft To Do list (a task folder under Tasks).")
-    def create_todo_list(name: str) -> dict:
-        def _act(a: Account) -> dict:
-            f = Folder(parent=a.tasks, name=name)
-            f.folder_class = "IPF.Task"
-            f.save()
-            return {"created": True, "name": name}
+            return with_account(_act)
 
-        return with_account(_act)
+        @mcp.tool(
+            description="DESTRUCTIVE: Move a To Do task to Deleted Items (recoverable from trash).",
+        )
+        def delete_task(task_id: str) -> dict:
+            def _act(a: Account) -> dict:
+                t = a.tasks.get(id=task_id)
+                t.move_to_trash()
+                return {"deleted": True, "task_id": task_id}
+
+            return with_account(_act)
+
+        @mcp.tool(description="Create a new Microsoft To Do list (a task folder under Tasks).")
+        def create_todo_list(name: str) -> dict:
+            def _act(a: Account) -> dict:
+                f = Folder(parent=a.tasks, name=name)
+                f.folder_class = "IPF.Task"
+                f.save()
+                return {"created": True, "name": name}
+
+            return with_account(_act)
