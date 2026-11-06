@@ -6,3 +6,5 @@ dist/
 *.egg-info/
 .DS_Store
 settings.json
+tokens.json
+*.tokens.json

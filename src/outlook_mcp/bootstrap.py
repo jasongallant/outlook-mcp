@@ -15,6 +15,7 @@ Walkthrough printed by ``--show-walkthrough`` (default on).
 
 from __future__ import annotations
 
+import json
 import sys
 
 import click
@@ -63,33 +64,71 @@ Setup
 """
 
 
+VALUES_HELP = """\
+Read captured values from a JSON FILE instead of interactive prompts.
+
+Terminal input is capped at ~1024 bytes per line (MAX_CANON), so pasting a
+multi-KB access_token or refresh_token into a prompt gets silently truncated.
+A file has no such limit. FILE shape:
+
+  {
+    "client_id": "f8d98a96-...",
+    "tenant": "common",
+    "user_email": "you@yourschool.edu",
+    "access_token": "eyJ0...",
+    "refresh_token": "0.AX...",
+    "expires_in": 3600
+  }
+"""
+
+
 @click.command()
 @click.option(
     "--show-walkthrough/--no-walkthrough",
     default=True,
     help="Print the Mac Mail capture instructions before prompting.",
 )
-def main(show_walkthrough: bool) -> None:
-    if show_walkthrough:
-        click.echo(WALKTHROUGH)
-        if not click.confirm("Ready to paste the captured values?", default=True):
-            click.echo("Aborted.")
-            sys.exit(1)
+@click.option(
+    "--values",
+    "values_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=VALUES_HELP,
+)
+def main(show_walkthrough: bool, values_path: str | None) -> None:
+    if values_path:
+        data = json.loads(open(values_path).read())
+        client_id = str(data["client_id"]).strip()
+        tenant = str(data.get("tenant") or config.get_tenant()).strip()
+        user_email = str(data.get("user_email") or config.get_user_email() or "").strip()
+        access_token = str(data["access_token"]).strip()
+        refresh_token = str(data["refresh_token"]).strip()
+        expires_in = int(data.get("expires_in", 3600))
+    else:
+        if show_walkthrough:
+            click.echo(WALKTHROUGH)
+            if not click.confirm("Ready to paste the captured values?", default=True):
+                click.echo("Aborted.")
+                sys.exit(1)
+            click.echo(
+                "Tip: if a token paste gets truncated, re-run with "
+                "`--values FILE` (JSON). Terminal lines cap at ~1024 bytes.\n"
+            )
 
-    client_id = click.prompt("client_id", type=str).strip()
-    tenant = click.prompt(
-        "tenant (UUID, or 'common')",
-        type=str,
-        default=config.get_tenant(),
-        show_default=True,
-    ).strip()
-    user_email = click.prompt(
-        "user_email (primary SMTP, e.g. you@yourschool.edu)", type=str,
-        default=config.get_user_email() or "",
-    ).strip()
-    access_token = click.prompt("access_token", type=str, hide_input=True).strip()
-    refresh_token = click.prompt("refresh_token", type=str, hide_input=True).strip()
-    expires_in = click.prompt("expires_in (seconds)", type=int, default=3600)
+        client_id = click.prompt("client_id", type=str).strip()
+        tenant = click.prompt(
+            "tenant (UUID, or 'common')",
+            type=str,
+            default=config.get_tenant(),
+            show_default=True,
+        ).strip()
+        user_email = click.prompt(
+            "user_email (primary SMTP, e.g. you@yourschool.edu)", type=str,
+            default=config.get_user_email() or "",
+        ).strip()
+        access_token = click.prompt("access_token", type=str, hide_input=True).strip()
+        refresh_token = click.prompt("refresh_token", type=str, hide_input=True).strip()
+        expires_in = click.prompt("expires_in (seconds)", type=int, default=3600)
 
     auth.save_tokens(
         client_id=client_id,
