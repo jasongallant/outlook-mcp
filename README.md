@@ -1,8 +1,9 @@
 # outlook-mcp
 
-Local MCP server that gives Claude Code (and any other MCP client) read access
-to your Outlook + Calendar + Contacts via Microsoft Graph and Exchange Web
-Services (EWS), authenticated through a one-time **Mac Mail.app OAuth sniff**.
+Local MCP server that gives Claude Code (and any other MCP client) access
+to your Outlook + Calendar + Contacts + Microsoft To Do via Microsoft Graph
+and Exchange Web Services (EWS), authenticated through a one-time
+**Mac Mail.app OAuth sniff**.
 Token auto-refreshes forever — no admin consent dance, no device-code flow
 (many institutional M365 tenants block both).
 
@@ -146,6 +147,10 @@ env var in the MCP client config:
 - `list_events` — date range
 - `get_event`
 - `list_contacts`
+- `list_todo_lists` — Microsoft To Do lists + open/total counts
+- `list_tasks` — tasks in a list (`list` name, `include_completed`, `limit`)
+- `get_task` — full task incl. notes/body
+- `search_tasks` — subject + body substring within a list
 
 **Write (OFF by default):**
 - `send_email`
@@ -155,9 +160,26 @@ env var in the MCP client config:
 - `create_event`
 - `update_event`
 - `respond_to_event` — accept / decline / tentativelyAccept
+- `create_task` — `list`, `due` (YYYY-MM-DD), `reminder` (ISO), `body`, `importance`
+- `update_task` — patch title / due / reminder / body / importance / status
+- `complete_task` — mark done (reversible via `update_task status=notStarted`)
+- `delete_task` — moves to Deleted Items (recoverable)
+- `create_todo_list`
 
 Each write tool description starts with `DESTRUCTIVE:` so the MCP client
 surfaces a clear approval prompt before running.
+
+### Microsoft To Do
+
+To Do lists are ordinary `IPF.Task` mailbox folders (the default **Tasks**
+list plus one child folder per custom list), so they are reached over EWS like
+mail and calendar — **not** via Graph. The Mac Mail OAuth grant carries no
+`Tasks.ReadWrite` scope, so the Graph `/me/todo/*` endpoints return 403.
+
+Due dates are whole dates (no time); reminders are datetimes in the
+`timezone` from settings.json. Due dates are stored at noon UTC so they land
+on the intended calendar day in any timezone (EWS otherwise rolls a UTC-midnight
+date back a day in negative-offset mailboxes).
 
 ## Token rotation / re-bootstrap
 

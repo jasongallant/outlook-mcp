@@ -2,30 +2,47 @@
 
 - ``get_user_profile`` uses Microsoft Graph (Mac Mail's OAuth grant has
   ``User.Read`` on Graph).
-- Everything else uses Exchange Web Services via ``exchangelib`` because the
-  Mac Mail grant has ``EWS.AccessAsUser.All`` (not Graph mail/calendar perms).
+- Everything else — mail, calendar, contacts, and Microsoft To Do — uses
+  Exchange Web Services via ``exchangelib`` because the Mac Mail grant has
+  ``EWS.AccessAsUser.All`` but no Graph mail/calendar/Tasks perms (the Graph
+  ``/me/todo/*`` endpoints 403; To Do lists are plain IPF.Task mailbox folders
+  reachable over EWS).
 
 Read tools registered always. Write tools (send_email, reply, mark_read,
-delete_message, create_event, update_event, respond_to_event) are gated
-behind ``OUTLOOK_MCP_WRITES`` env var so they never fire by accident.
+delete_message, create_event, update_event, respond_to_event, create_task,
+update_task, complete_task, delete_task, create_todo_list) are gated behind
+``OUTLOOK_MCP_WRITES`` env var so they never fire by accident.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any
 
 from exchangelib import (
     Account,
     CalendarItem,
+    EWSDate,
     EWSDateTime,
     EWSTimeZone,
     HTMLBody,
     Mailbox,
     Message,
     Q,
+    Task,
 )
+from exchangelib.folders import Folder
 from exchangelib.items import AcceptItem, DeclineItem, TentativelyAcceptItem
+
+# EWS Task DueDate/StartDate are date-backed by a datetime. exchangelib sends
+# that datetime at UTC midnight, which a server in a negative-offset mailbox
+# timezone rolls back to the previous calendar day on readback (and in the
+# To Do app). Backing the date with noon UTC keeps it on the intended day for
+# every real-world timezone (UTC-11 .. UTC+11). Matches how the To Do app
+# stores due dates.
+for _fname in ("due_date", "start_date"):
+    Task.get_field_by_fieldname(_fname)._default_time = time(12, 0)
 from mcp.server.fastmcp import FastMCP
 
 from . import graph_client as g
@@ -74,6 +91,73 @@ def _event_to_dict(e: CalendarItem) -> dict[str, Any]:
         "is_cancelled": getattr(e, "is_cancelled", None),
         "web_link": getattr(e, "web_link", None),
     }
+
+
+# ---- Microsoft To Do (EWS Task folders) ----------------------------------
+#
+# To Do lists are plain IPF.Task folders in the mailbox: the default "Tasks"
+# folder (``account.tasks``) plus its child folders (one per custom list).
+# Reached over EWS like mail/calendar — the Mac Mail Graph grant has no
+# Tasks.ReadWrite scope, so the Graph /me/todo/* endpoints 403.
+
+_IMPORTANCE = {"low": "Low", "normal": "Normal", "high": "High"}
+
+
+def _todo_folders(a: Account) -> list[Folder]:
+    """Default Tasks folder first, then each child task folder (a To Do list)."""
+    folders = [a.tasks]
+    for child in a.tasks.children:
+        if str(getattr(child, "folder_class", "") or "").startswith("IPF.Task"):
+            folders.append(child)
+    return folders
+
+
+def _resolve_list(a: Account, name: str | None) -> Folder:
+    """Return the task folder for a list name (case-insensitive). None → default."""
+    if not name or not name.strip():
+        return a.tasks
+    want = name.strip().lower()
+    for f in _todo_folders(a):
+        if f.name.lower() == want:
+            return f
+    available = ", ".join(repr(f.name) for f in _todo_folders(a))
+    raise ValueError(f"To Do list {name!r} not found. Available: {available}")
+
+
+def _parse_due(s: str) -> EWSDate:
+    """Parse a due date. Accepts 'YYYY-MM-DD' or a full ISO datetime (date part used)."""
+    return EWSDate.from_date(date.fromisoformat(s[:10]))
+
+
+def _parse_reminder(s: str) -> EWSDateTime:
+    """Parse an ISO datetime reminder into the configured timezone."""
+    tz = EWSTimeZone(get_timezone())
+    return EWSDateTime.from_datetime(datetime.fromisoformat(s)).astimezone(tz)
+
+
+def _task_to_dict(t: Task, list_name: str | None = None) -> dict[str, Any]:
+    due = t.due_date
+    reminder = t.reminder_due_by if t.reminder_is_set else None
+    return {
+        "id": t.id,
+        "subject": t.subject,
+        "list": list_name if list_name is not None else getattr(getattr(t, "folder", None), "name", None),
+        "status": t.status,
+        "is_complete": bool(getattr(t, "is_complete", None)),
+        "percent_complete": int(t.percent_complete) if t.percent_complete is not None else None,
+        "importance": t.importance,
+        "due": due.isoformat() if due else None,
+        "start": t.start_date.isoformat() if t.start_date else None,
+        "reminder": reminder.isoformat() if reminder else None,
+        "complete_date": t.complete_date.isoformat() if t.complete_date else None,
+        "categories": list(t.categories) if t.categories else [],
+    }
+
+
+def _task_full(t: Task, list_name: str | None = None) -> dict[str, Any]:
+    base = _task_to_dict(t, list_name)
+    base["body_text"] = t.text_body or (str(t.body) if t.body else "")
+    return base
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -220,6 +304,82 @@ def register_tools(mcp: FastMCP) -> None:
                     }
                 )
             return out
+
+        return with_account(_act)
+
+    # ---------------- TO DO (read) ----------------
+
+    @mcp.tool(
+        description=(
+            "List Microsoft To Do lists (the default Tasks list plus any custom lists), "
+            "with per-list open and total task counts."
+        ),
+    )
+    def list_todo_lists() -> list[dict]:
+        def _act(a: Account) -> list[dict]:
+            out = []
+            for f in _todo_folders(a):
+                open_count = f.filter(is_complete=False).count()
+                out.append(
+                    {
+                        "name": f.name,
+                        "is_default": f.id == a.tasks.id,
+                        "open": open_count,
+                        "total": f.total_count,
+                    }
+                )
+            return out
+
+        return with_account(_act)
+
+    @mcp.tool(
+        description=(
+            "List tasks in a Microsoft To Do list. list is the list name (omit for the "
+            "default Tasks list). include_completed=false hides finished tasks. Newest first."
+        ),
+    )
+    def list_tasks(
+        list: str | None = None,
+        include_completed: bool = False,
+        limit: int = 50,
+    ) -> list[dict]:
+        def _act(a: Account) -> list[dict]:
+            f = _resolve_list(a, list)
+            qs = f.all().order_by("-last_modified_time")
+            if not include_completed:
+                qs = qs.filter(is_complete=False)
+            return [_task_to_dict(t, f.name) for t in qs[:limit]]
+
+        return with_account(_act)
+
+    @mcp.tool(description="Fetch a single To Do task by EWS id, including its notes/body.")
+    def get_task(task_id: str) -> dict:
+        def _act(a: Account) -> dict:
+            t = a.tasks.get(id=task_id)
+            return _task_full(t)
+
+        return with_account(_act)
+
+    @mcp.tool(
+        description=(
+            "Search To Do tasks by subject/body substring. Searches the default Tasks list "
+            "unless list names a specific list. Omits completed tasks unless include_completed=true."
+        ),
+    )
+    def search_tasks(
+        query: str,
+        list: str | None = None,
+        include_completed: bool = False,
+        limit: int = 25,
+    ) -> list[dict]:
+        def _act(a: Account) -> list[dict]:
+            f = _resolve_list(a, list)
+            qs = f.filter(Q(subject__icontains=query) | Q(body__icontains=query)).order_by(
+                "-last_modified_time"
+            )
+            if not include_completed:
+                qs = qs.filter(is_complete=False)
+            return [_task_to_dict(t, f.name) for t in qs[:limit]]
 
         return with_account(_act)
 
@@ -375,5 +535,132 @@ def register_tools(mcp: FastMCP) -> None:
                 body=comment,
             ).send()
             return {"event_id": event_id, "response": response}
+
+        return with_account(_act)
+
+    # ---------------- TO DO (write, gated) ----------------
+
+    @mcp.tool(
+        description=(
+            "Create a Microsoft To Do task. list is the target list name (omit for the "
+            "default Tasks list). due is a date 'YYYY-MM-DD'. reminder is an ISO datetime "
+            "(local, settings.json timezone). importance is low|normal|high."
+        ),
+    )
+    def create_task(
+        title: str,
+        list: str | None = None,
+        due: str | None = None,
+        reminder: str | None = None,
+        body: str | None = None,
+        importance: str = "normal",
+    ) -> dict:
+        imp = _IMPORTANCE.get(importance.lower())
+        if imp is None:
+            raise ValueError("importance must be low|normal|high")
+
+        def _act(a: Account) -> dict:
+            f = _resolve_list(a, list)
+            t = Task(account=a, folder=f, subject=title, importance=imp)
+            if body is not None:
+                t.body = body
+            if due is not None:
+                t.due_date = _parse_due(due)
+            if reminder is not None:
+                t.reminder_is_set = True
+                t.reminder_due_by = _parse_reminder(reminder)
+            t.save()
+            # Re-fetch: server derives status/percent/is_complete; the saved
+            # in-memory object does not reflect them.
+            return _task_to_dict(a.tasks.get(id=t.id), f.name)
+
+        return with_account(_act)
+
+    @mcp.tool(
+        description=(
+            "DESTRUCTIVE: Patch fields on a To Do task (title, due 'YYYY-MM-DD', reminder "
+            "ISO datetime, body, importance low|normal|high, status "
+            "notStarted|inProgress|completed|waitingOnOthers|deferred)."
+        ),
+    )
+    def update_task(
+        task_id: str,
+        title: str | None = None,
+        due: str | None = None,
+        reminder: str | None = None,
+        body: str | None = None,
+        importance: str | None = None,
+        status: str | None = None,
+    ) -> dict:
+        status_map = {
+            "notstarted": "NotStarted",
+            "inprogress": "InProgress",
+            "completed": "Completed",
+            "waitingonothers": "WaitingOnOthers",
+            "deferred": "Deferred",
+        }
+        imp = None
+        if importance is not None:
+            imp = _IMPORTANCE.get(importance.lower())
+            if imp is None:
+                raise ValueError("importance must be low|normal|high")
+        st = None
+        if status is not None:
+            st = status_map.get(status.lower())
+            if st is None:
+                raise ValueError(f"status must be one of {', '.join(status_map)}")
+
+        def _act(a: Account) -> dict:
+            t = a.tasks.get(id=task_id)
+            if title is not None:
+                t.subject = title
+            if body is not None:
+                t.body = body
+            if imp is not None:
+                t.importance = imp
+            if due is not None:
+                t.due_date = _parse_due(due)
+            if reminder is not None:
+                t.reminder_is_set = True
+                t.reminder_due_by = _parse_reminder(reminder)
+            if st is not None:
+                # Setting status drives percent_complete server-side; only
+                # reopening needs an explicit reset (percent is a Decimal field).
+                t.status = st
+                if st == "NotStarted":
+                    t.percent_complete = Decimal(0)
+            t.save()
+            return _task_to_dict(a.tasks.get(id=task_id))
+
+        return with_account(_act)
+
+    @mcp.tool(description="Mark a To Do task complete. Reversible via update_task status=notStarted.")
+    def complete_task(task_id: str) -> dict:
+        def _act(a: Account) -> dict:
+            t = a.tasks.get(id=task_id)
+            t.status = "Completed"  # server auto-sets percent_complete=100
+            t.save()
+            return _task_to_dict(a.tasks.get(id=task_id))
+
+        return with_account(_act)
+
+    @mcp.tool(
+        description="DESTRUCTIVE: Move a To Do task to Deleted Items (recoverable from trash).",
+    )
+    def delete_task(task_id: str) -> dict:
+        def _act(a: Account) -> dict:
+            t = a.tasks.get(id=task_id)
+            t.move_to_trash()
+            return {"deleted": True, "task_id": task_id}
+
+        return with_account(_act)
+
+    @mcp.tool(description="Create a new Microsoft To Do list (a task folder under Tasks).")
+    def create_todo_list(name: str) -> dict:
+        def _act(a: Account) -> dict:
+            f = Folder(parent=a.tasks, name=name)
+            f.folder_class = "IPF.Task"
+            f.save()
+            return {"created": True, "name": name}
 
         return with_account(_act)
