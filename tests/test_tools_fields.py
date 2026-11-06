@@ -73,10 +73,32 @@ def test_all_tools_register_with_writes_enabled(monkeypatch):
     assert {"get_attachment", "list_attachments", "send_email", "reply_to_message"} <= names
 
 
-def test_get_attachment_is_available_without_writes(monkeypatch):
-    monkeypatch.setenv("OUTLOOK_MCP_WRITES", "0")
+def _registered(monkeypatch, **flags):
+    for name in ("WRITES", "MAIL_WRITES", "CALENDAR_WRITES", "TODO_WRITES"):
+        monkeypatch.setenv(f"OUTLOOK_MCP_{name}", flags.get(name, "0"))
     server = FastMCP("t")
     tools.register_tools(server)
-    names = {t.name for t in asyncio.run(server.list_tools())}
+    return {t.name: t for t in asyncio.run(server.list_tools())}
+
+
+def test_get_attachment_is_available_without_writes(monkeypatch):
+    names = _registered(monkeypatch)
     assert "get_attachment" in names
     assert "send_email" not in names
+
+
+def test_todo_flag_alone_keeps_email_sending_off(monkeypatch):
+    names = _registered(monkeypatch, TODO_WRITES="1")
+    assert "create_task" in names
+    assert "get_attachment" in names
+    assert "send_email" not in names
+    assert "reply_to_message" not in names
+    assert "create_event" not in names
+
+
+def test_mail_flag_alone_exposes_send_with_attachments(monkeypatch):
+    names = _registered(monkeypatch, MAIL_WRITES="1")
+    assert "attachments" in names["send_email"].inputSchema["properties"]
+    assert "attachments" in names["reply_to_message"].inputSchema["properties"]
+    assert "create_task" not in names
+    assert "create_event" not in names
